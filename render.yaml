@@ -1,5 +1,6 @@
-# Render blueprint: one web service + one cron job that pokes it.
-# Set the secret env vars in the Render dashboard (marked sync: false below).
+# Render blueprint: a single web service. Scheduling is done externally by
+# cron-job.org hitting POST /api/send-campaign (see README > Scheduling).
+# Set the `sync: false` secrets in the Render dashboard after the first deploy.
 services:
   - type: web
     name: job-mail-automation
@@ -31,20 +32,3 @@ services:
         value: "true"
       - key: BOUNCE_LOOKBACK_DAYS
         value: "3"
-
-  - type: cron
-    name: job-mail-campaign-trigger
-    runtime: node
-    plan: free
-    # Hourly. With BATCH_SIZE=15 that is ~360 emails/day (under Gmail's ~500 cap).
-    schedule: "0 * * * *"
-    buildCommand: npm install
-    # Uses curl to hit the web service. Set SERVICE_URL and CAMPAIGN_SECRET on this cron job.
-    startCommand: >
-      curl -fsS -X POST "$SERVICE_URL/api/send-campaign"
-      -H "x-campaign-secret: $CAMPAIGN_SECRET"
-    envVars:
-      - key: SERVICE_URL
-        sync: false
-      - key: CAMPAIGN_SECRET
-        sync: false
