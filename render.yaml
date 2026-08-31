@@ -1,0 +1,50 @@
+# Render blueprint: one web service + one cron job that pokes it.
+# Set the secret env vars in the Render dashboard (marked sync: false below).
+services:
+  - type: web
+    name: job-mail-automation
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: EMAIL_USER
+        sync: false
+      - key: EMAIL_PASSWORD
+        sync: false
+      - key: EMAIL_FROM_NAME
+        sync: false
+      - key: GOOGLE_SHEET_API
+        sync: false
+      - key: GOOGLE_SHEET_API_TOKEN
+        sync: false
+      - key: CAMPAIGN_SECRET
+        generateValue: true
+      - key: BATCH_SIZE
+        value: "15"
+      - key: SEND_DELAY_MS
+        value: "1500"
+      - key: RETRY_FAILED
+        value: "false"
+      - key: PROCESS_BOUNCES
+        value: "true"
+      - key: BOUNCE_LOOKBACK_DAYS
+        value: "3"
+
+  - type: cron
+    name: job-mail-campaign-trigger
+    runtime: node
+    plan: free
+    # Hourly. With BATCH_SIZE=15 that is ~360 emails/day (under Gmail's ~500 cap).
+    schedule: "0 * * * *"
+    buildCommand: npm install
+    # Uses curl to hit the web service. Set SERVICE_URL and CAMPAIGN_SECRET on this cron job.
+    startCommand: >
+      curl -fsS -X POST "$SERVICE_URL/api/send-campaign"
+      -H "x-campaign-secret: $CAMPAIGN_SECRET"
+    envVars:
+      - key: SERVICE_URL
+        sync: false
+      - key: CAMPAIGN_SECRET
+        sync: false
