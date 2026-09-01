@@ -1,8 +1,12 @@
 'use strict';
 
-// Reads delivery-failure notices out of the sending account's inbox over IMAP
-// and marks the matching sheet rows "Bounced". SMTP accepts a message for relay,
-// so a later rejection by the recipient's server only surfaces here, as a bounce.
+// Reads delivery-failure notices from the sending account's inbox and marks the
+// matching sheet rows "Bounced". SMTP accepts a message for relay, so a later
+// rejection by the recipient's server only surfaces here, as a bounce.
+//
+// Transport:
+//   smtp      -> IMAP search of INBOX
+//   gmail_api -> Gmail API search over HTTPS (Render blocks IMAP)
 //
 // Stateless + idempotent: every run re-scans the last N days of notices. Writing
 // "Bounced" over a row that already says "Bounced" is a no-op, so nothing needs
@@ -12,6 +16,7 @@ const { simpleParser } = require('mailparser');
 
 const config = require('../config');
 const sheet = require('./googleSheet');
+const gmailApi = require('./gmailApi');
 
 const MAX_MESSAGES = 400;
 const ADDR = '[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}';
@@ -69,6 +74,66 @@ function classify(parsed) {
   return 'unknown';
 }
 
+// --- source collection: raw MIME buffers of candidate bounce notices ---
+
+async function collectViaImap(days) {
+  const client = new ImapFlow({
+    host: config.imap.host,
+    port: config.imap.port,
+    secure: true,
+    auth: { user: config.imap.user, pass: config.imap.pass },
+    logger: false,
+    greetingTimeout: 15000,
+    socketTimeout: 60000,
+  });
+
+  const sources = [];
+  await client.connect();
+  const lock = await client.getMailboxLock('INBOX');
+  try {
+    const since = new Date(Date.now() - days * 86400000);
+    const queries = [
+      { from: 'mailer-daemon', since },
+      { from: 'postmaster', since },
+      { subject: 'Undeliverable', since },
+      { subject: 'Delivery Status Notification', since },
+      { subject: 'Returned mail', since },
+    ];
+    const uidSet = new Set();
+    for (const q of queries) {
+      const found = await client.search(q, { uid: true });
+      (found || []).forEach((u) => uidSet.add(u));
+    }
+    let uids = [...uidSet].sort((a, b) => a - b);
+    if (uids.length > MAX_MESSAGES) uids = uids.slice(-MAX_MESSAGES);
+    if (uids.length) {
+      for await (const msg of client.fetch({ uid: uids }, { source: true }, { uid: true })) {
+        sources.push(msg.source);
+      }
+    }
+  } finally {
+    lock.release();
+    await client.logout().catch(() => {});
+  }
+  return sources;
+}
+
+async function collectViaGmailApi(days) {
+  const q =
+    `newer_than:${days}d in:anywhere (from:mailer-daemon OR from:postmaster ` +
+    `OR subject:Undeliverable OR subject:"Delivery Status Notification" OR subject:"Returned mail")`;
+  const ids = (await gmailApi.listMessages(q, MAX_MESSAGES)).slice(0, MAX_MESSAGES);
+  const sources = [];
+  for (const id of ids) {
+    try {
+      sources.push(await gmailApi.getRawMessage(id));
+    } catch {
+      /* skip a single unreadable message */
+    }
+  }
+  return sources;
+}
+
 /**
  * @param {object} [opts]
  * @param {boolean} [opts.dryRun]   don't write to the sheet
@@ -77,6 +142,7 @@ function classify(parsed) {
 async function processBounces(opts = {}) {
   const dryRun = opts.dryRun ?? false;
   const summary = {
+    transport: config.mailTransport,
     scanned: 0,
     bounced: [],
     alreadyBounced: 0,
@@ -100,91 +166,62 @@ async function processBounces(opts = {}) {
     }
   }
 
-  const client = new ImapFlow({
-    host: config.imap.host,
-    port: config.imap.port,
-    secure: true,
-    auth: { user: config.imap.user, pass: config.imap.pass },
-    logger: false,
-  });
+  const days = config.campaign.bounceLookbackDays;
+  const sources =
+    config.mailTransport === 'gmail_api' ? await collectViaGmailApi(days) : await collectViaImap(days);
+  if (!sources.length) return summary;
 
-  await client.connect();
-  const lock = await client.getMailboxLock('INBOX');
+  const seenWrites = new Set();
 
-  try {
-    const since = new Date(Date.now() - config.campaign.bounceLookbackDays * 86400000);
-    const queries = [
-      { from: 'mailer-daemon', since },
-      { from: 'postmaster', since },
-      { subject: 'Undeliverable', since },
-      { subject: 'Delivery Status Notification', since },
-      { subject: 'Returned mail', since },
-    ];
+  for (const source of sources) {
+    summary.scanned += 1;
 
-    const uidSet = new Set();
-    for (const q of queries) {
-      const found = await client.search(q, { uid: true });
-      (found || []).forEach((u) => uidSet.add(u));
+    let parsed;
+    try {
+      parsed = await simpleParser(source);
+    } catch (err) {
+      summary.errors.push({ error: `parse failed: ${err.message}` });
+      continue;
     }
-    let uids = [...uidSet].sort((a, b) => a - b);
-    if (!uids.length) return summary;
-    if (uids.length > MAX_MESSAGES) uids = uids.slice(-MAX_MESSAGES);
 
-    const seenWrites = new Set();
+    const recipients = extractRecipients(parsed);
+    if (!recipients.length) continue; // not a parseable NDR (auto-reply, etc.)
 
-    for await (const msg of client.fetch({ uid: uids }, { source: true }, { uid: true })) {
-      summary.scanned += 1;
+    const kind = classify(parsed);
 
-      let parsed;
-      try {
-        parsed = await simpleParser(msg.source);
-      } catch (err) {
-        summary.errors.push({ uid: msg.uid, error: `parse failed: ${err.message}` });
+    for (const email of recipients) {
+      const contact = byEmail.get(email);
+      const rec = { email, kind, srNo: contact ? contact.srNo : null };
+
+      if (kind === 'transient') {
+        summary.transient.push(rec);
+        continue;
+      }
+      if (kind !== 'permanent') {
+        summary.unclassified.push(rec);
+        continue;
+      }
+      if (!contact) {
+        summary.unmatched.push(rec);
+        continue;
+      }
+      if (contact.status.toLowerCase() === 'bounced' || seenWrites.has(email)) {
+        summary.alreadyBounced += 1;
         continue;
       }
 
-      const recipients = extractRecipients(parsed);
-      if (!recipients.length) continue; // not a parseable NDR (auto-reply, etc.)
-
-      const kind = classify(parsed);
-
-      for (const email of recipients) {
-        const contact = byEmail.get(email);
-        const rec = { email, kind, srNo: contact ? contact.srNo : null };
-
-        if (kind === 'transient') {
-          summary.transient.push(rec);
-          continue;
-        }
-        if (kind !== 'permanent') {
-          summary.unclassified.push(rec);
-          continue;
-        }
-        if (!contact) {
-          summary.unmatched.push(rec);
-          continue;
-        }
-        if (contact.status.toLowerCase() === 'bounced' || seenWrites.has(email)) {
-          summary.alreadyBounced += 1;
-          continue;
-        }
-
-        seenWrites.add(email);
-        summary.bounced.push(rec);
-        if (!dryRun) {
-          try {
-            await sheet.updateStatus(contact, 'Bounced');
-            rec.updated = true;
-          } catch (err) {
-            rec.updated = false;
-            rec.writeErr = err.message;
-          }
+      seenWrites.add(email);
+      summary.bounced.push(rec);
+      if (!dryRun) {
+        try {
+          await sheet.updateStatus(contact, 'Bounced');
+          rec.updated = true;
+        } catch (err) {
+          rec.updated = false;
+          rec.writeErr = err.message;
         }
       }
     }
-  } finally {
-    lock.release();
-    await client.logout().catch(() => {});
   }
 
   return summary;

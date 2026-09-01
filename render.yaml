@@ -10,11 +10,18 @@ services:
     startCommand: node server.js
     healthCheckPath: /health
     envVars:
+      # Render blocks outbound SMTP (465) and IMAP (993) — must use the Gmail API.
+      - key: MAIL_TRANSPORT
+        value: gmail_api
       - key: EMAIL_USER
         sync: false
-      - key: EMAIL_PASSWORD
-        sync: false
       - key: EMAIL_FROM_NAME
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
         sync: false
       - key: GOOGLE_SHEET_API
         sync: false

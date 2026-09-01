@@ -1,17 +1,26 @@
 # job-mail-automation
 
 Reads job-outreach contacts from a Google Sheet (via a Google Apps Script web
-app), sends a templated email to every row whose **Status** is `Pending` (Gmail
-SMTP + NodeMailer), then writes the result (`Sent` / `Failed` / `Skipped`) back
-to the sheet.
+app), sends a templated email to every row whose **Status** is `Pending`, then
+writes the result (`Sent` / `Bounced` / `Failed` / `Skipped`) back to the sheet.
 
 ```
-Google Sheet ──(Apps Script /exec)──►  Node API (Render web service)  ──►  Gmail SMTP
-      ▲                                          │         ▲
-      └──────────── POST status ◄────────────────┘         │ IMAP: read bounces
-                                                           │
+Google Sheet ──(Apps Script /exec)──►  Node API (Render web service)  ──►  Gmail
+      ▲                                          │         ▲               send + read
+      └──────────── POST status ◄────────────────┘         └── bounces     bounces
 cron-job.org  ──hourly POST /api/send-campaign──►  Node API (runs in background)
 ```
+
+**Mail transport** (`MAIL_TRANSPORT`):
+
+| | `smtp` (default) | `gmail_api` |
+| --- | --- | --- |
+| Sends via | Gmail SMTP :465 + App Password | Gmail API over HTTPS :443 |
+| Reads bounces via | IMAP :993 | Gmail API |
+| Works on Render | **No** (465/993 blocked) | **Yes** |
+| Setup | App Password | Desktop OAuth client + refresh token |
+
+Use `smtp` locally, `gmail_api` on Render.
 
 ## Sheet layout
 
@@ -54,12 +63,27 @@ deployments → Edit → new version** (or the URL keeps serving the old code).
 > and set the same value in `GOOGLE_SHEET_API_TOKEN`. The Node client already
 > sends `?token=` and a `token` body field when that env var is set.
 
-### 2. Gmail App Password
+### 2. Mail transport
 
-1. Enable 2-Step Verification on the Google account.
-2. https://myaccount.google.com/apppasswords → create one → 16 chars → `EMAIL_PASSWORD`.
-3. `EMAIL_USER` is the full Gmail address. The same App Password is used for IMAP
-   (bounce reading) — no extra setup.
+`EMAIL_USER` is the sending Gmail address in both modes.
+
+**`smtp`** (local): enable 2-Step Verification →
+https://myaccount.google.com/apppasswords → 16-char password → `EMAIL_PASSWORD`.
+Same password is reused for IMAP bounce reading.
+
+**`gmail_api`** (Render — SMTP/IMAP ports are blocked there):
+
+1. [Google Cloud Console](https://console.cloud.google.com/) → new project →
+   **APIs & Services → enable "Gmail API"**.
+2. **OAuth consent screen** → External → fill required fields → **Publish app**
+   (if left in "Testing", the refresh token dies after 7 days).
+3. **Credentials → Create credentials → OAuth client ID → Desktop app.** Put the
+   id/secret in `.env` as `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
+4. `npm run google-token` → open the URL, sign in as the **sending** account,
+   allow. Copy the printed `GOOGLE_REFRESH_TOKEN` into `.env` and Render.
+
+Scopes used: `gmail.send` + `gmail.modify`. Sends as the real account (SPF/DKIM
+aligned, no "via" header).
 
 ### 3. Local run
 
@@ -84,14 +108,19 @@ Add `?dryRun=true` or `?limit=5` to the URL to override behaviour for one call.
 
 ## Deploy on Render
 
-`render.yaml` defines one free web service. In Render: **New → Blueprint**, point
-it at this repo, then fill the `sync: false` env vars in the dashboard:
-`EMAIL_USER`, `EMAIL_PASSWORD`, `EMAIL_FROM_NAME`, `GOOGLE_SHEET_API` (and
-`GOOGLE_SHEET_API_TOKEN` if you added a token check). `CAMPAIGN_SECRET` is
-auto-generated — **copy its value**, cron-job.org needs it.
+`render.yaml` defines one free web service and pins `MAIL_TRANSPORT=gmail_api`
+(SMTP/IMAP are blocked on Render). In Render: **New → Blueprint**, point it at
+this repo, then fill the `sync: false` env vars in the dashboard:
+
+- `EMAIL_USER`, `EMAIL_FROM_NAME`
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` (from
+  `npm run google-token` — see Setup step 2)
+- `GOOGLE_SHEET_API` (and `GOOGLE_SHEET_API_TOKEN` if you added a token check)
+- `CAMPAIGN_SECRET` is auto-generated — **copy its value**, cron-job.org needs it.
 
 Manual alternative: **New → Web Service** from the repo, build `npm install`,
-start `node server.js`, health check `/health`, add the vars from `.env.example`.
+start `node server.js`, health check `/health`, add the vars from `.env.example`
+plus `MAIL_TRANSPORT=gmail_api`.
 
 Note the free web service sleeps after 15 min idle, so the first request each
 hour is a cold start (~30-60s).
@@ -129,23 +158,23 @@ have the same under `[send-campaign] done`.
 
 | Method | Path                  | Notes                                                    |
 | ------ | --------------------- | ------------------------------------------------------- |
-| GET    | `/health`              | Liveness, `running` flag, and `lastRun`. Use for the keep-warm ping. |
+| GET    | `/health`              | Liveness, `running` / `runningForMs`, and `lastRun`. Use for the keep-warm ping. |
 | GET    | `/api/last-run`        | Summary of the most recent run (counts, outcomes, bounce scan). |
 | POST   | `/api/send-campaign`   | Scans bounces, then sends one batch. Runs in the background, returns `202`. Auth: `x-campaign-secret` header or `?key=`. Query: `dryRun`, `limit`. `409` if already running. |
 | POST   | `/api/process-bounces` | Bounce scan only, background + `202`. Same auth. Query: `dryRun`. |
 
 ## Bounce handling
 
-SMTP returns success as soon as Gmail accepts a message for relay. If the
-recipient's server rejects it afterwards (bad address, blocked sender), Gmail
-emails a failure notice back — so the row is `Sent` but the mail never arrived.
+Gmail reports success as soon as it accepts a message for relay. If the
+recipient's server rejects it afterwards (bad address, blocked sender), a failure
+notice comes back — so the row is `Sent` but the mail never arrived.
 
-Before every send batch, the app reads the inbox over IMAP for the last
-`BOUNCE_LOOKBACK_DAYS` (default 3) days of notices — Gmail `mailer-daemon`
-DSNs, `postmaster@` NDRs, and `Undeliverable:` Exchange bounces — pulls the
-failed address out of each, and sets that row to `Bounced` (permanent 5.x.x
-failures only; transient 4.x.x are left alone). It is stateless and idempotent:
-re-marking a `Bounced` row is a no-op, and read/unread state is not touched.
+Before every send batch, the app scans the last `BOUNCE_LOOKBACK_DAYS` (default
+3) days of notices — `mailer-daemon` DSNs, `postmaster@` NDRs, `Undeliverable:`
+Exchange bounces — via IMAP (`smtp` transport) or the Gmail API (`gmail_api`),
+pulls the failed address out of each, and sets that row to `Bounced` (permanent
+5.x.x only; transient 4.x.x left alone). Stateless and idempotent: re-marking a
+`Bounced` row is a no-op, and read/unread state is not touched.
 
 Set `PROCESS_BOUNCES=false` to disable, or run it on its own with
 `npm run bounces` / `POST /api/process-bounces`.

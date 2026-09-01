@@ -21,24 +21,42 @@ function int(name, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+// How mail is sent and how bounces are read:
+//   smtp      (default) Gmail SMTP + App Password + IMAP. Simple, works locally.
+//             Needs outbound ports 465 and 993 — BLOCKED on Render.
+//   gmail_api Gmail API over HTTPS/443 for both sending and bounce reading.
+//             Works on Render. Needs GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN.
+const mailTransport =
+  (process.env.MAIL_TRANSPORT || 'smtp').toLowerCase() === 'gmail_api' ? 'gmail_api' : 'smtp';
+const requiredForSmtp = (name) => (mailTransport === 'smtp' ? required(name) : (process.env[name] || '').trim());
+const requiredForApi = (name) => (mailTransport === 'gmail_api' ? required(name) : (process.env[name] || '').trim());
+
 const config = {
   port: int('PORT', 3000),
   campaignSecret: process.env.CAMPAIGN_SECRET || '',
+  mailTransport,
 
   gmail: {
     user: required('EMAIL_USER'),
-    pass: required('EMAIL_PASSWORD'),
+    pass: requiredForSmtp('EMAIL_PASSWORD'),
     fromName: process.env.EMAIL_FROM_NAME || '',
     replyTo: process.env.EMAIL_REPLY_TO || '',
   },
 
-  // Inbox reader for bounce / delivery-failure notices. Defaults to the same
-  // Gmail account used for sending.
+  // OAuth2 for the Gmail API transport (MAIL_TRANSPORT=gmail_api).
+  // Get a refresh token with `npm run google-token`.
+  google: {
+    clientId: requiredForApi('GOOGLE_CLIENT_ID'),
+    clientSecret: requiredForApi('GOOGLE_CLIENT_SECRET'),
+    refreshToken: requiredForApi('GOOGLE_REFRESH_TOKEN'),
+  },
+
+  // Bounce reader for the smtp transport. gmail_api reads bounces over the API.
   imap: {
     host: process.env.IMAP_HOST || 'imap.gmail.com',
     port: int('IMAP_PORT', 993),
-    user: process.env.IMAP_USER || required('EMAIL_USER'),
-    pass: process.env.IMAP_PASSWORD || required('EMAIL_PASSWORD'),
+    user: process.env.IMAP_USER || process.env.EMAIL_USER,
+    pass: process.env.IMAP_PASSWORD || requiredForSmtp('EMAIL_PASSWORD'),
   },
 
   sheet: {

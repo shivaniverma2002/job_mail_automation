@@ -11,7 +11,21 @@ app.use(express.json());
 // One job at a time. `lastRun` holds the outcome of the most recent one so an
 // external pinger (cron-job.org) can check results on a later request.
 let running = false;
+let runStartedAt = 0;
 let lastRun = null;
+
+// If a run somehow hangs (stalled IMAP/SMTP/socket), don't let its lock wedge
+// the campaign forever — after this long a new trigger is allowed through.
+const STALE_LOCK_MS = 15 * 60 * 1000;
+
+function locked() {
+  if (!running) return false;
+  if (Date.now() - runStartedAt > STALE_LOCK_MS) {
+    console.warn(`[lock] previous run stale (${Math.round((Date.now() - runStartedAt) / 1000)}s) — overriding`);
+    return false;
+  }
+  return true;
+}
 
 function authorized(req) {
   if (!config.campaignSecret) return true; // no secret configured -> open (dev only)
@@ -24,6 +38,7 @@ function authorized(req) {
 // multi-minute batch. Overlap is prevented by `running` (callers get 409).
 function startBackground(task, fn) {
   running = true;
+  runStartedAt = Date.now();
   const startedAt = new Date().toISOString();
   lastRun = { task, startedAt, finishedAt: null, ok: null };
 
@@ -43,7 +58,8 @@ function startBackground(task, fn) {
 }
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, running, lastRun, time: new Date().toISOString() });
+  const runningForMs = running ? Date.now() - runStartedAt : 0;
+  res.json({ ok: true, running, runningForMs, lastRun, time: new Date().toISOString() });
 });
 
 app.get('/api/last-run', (req, res) => {
@@ -52,7 +68,7 @@ app.get('/api/last-run', (req, res) => {
 
 app.post('/api/send-campaign', (req, res) => {
   if (!authorized(req)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  if (running) return res.status(409).json({ ok: false, error: 'A run is already in progress', lastRun });
+  if (locked()) return res.status(409).json({ ok: false, error: 'A run is already in progress', lastRun });
 
   const dryRun = req.query.dryRun === 'true' || req.body?.dryRun === true;
   const limit = Number(req.query.limit || req.body?.limit) || undefined;
@@ -62,7 +78,7 @@ app.post('/api/send-campaign', (req, res) => {
 
 app.post('/api/process-bounces', (req, res) => {
   if (!authorized(req)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  if (running) return res.status(409).json({ ok: false, error: 'A run is already in progress', lastRun });
+  if (locked()) return res.status(409).json({ ok: false, error: 'A run is already in progress', lastRun });
 
   const dryRun = req.query.dryRun === 'true' || req.body?.dryRun === true;
   startBackground('process-bounces', () => processBounces({ dryRun }));

@@ -70,10 +70,13 @@ async function runCampaign(opts = {}) {
   }
 
   // Reconcile earlier sends against bounce notices before sending more. Never
-  // let an inbox/IMAP problem abort the campaign.
+  // let an inbox/IMAP problem abort or hang the campaign.
   if (!dryRun && config.campaign.processBounces) {
     try {
-      summary.bounces = await processBounces({ contacts });
+      const timeout = new Promise((_, rej) =>
+        setTimeout(() => rej(new Error('bounce scan timed out after 120s')), 120000)
+      );
+      summary.bounces = await Promise.race([processBounces({ contacts }), timeout]);
     } catch (err) {
       summary.bounces = { error: (err && err.message) || String(err) };
     }
