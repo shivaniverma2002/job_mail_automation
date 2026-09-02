@@ -33,6 +33,36 @@ function authorized(req) {
   return provided === config.campaignSecret;
 }
 
+// Compact view of a run — counts only, no per-row arrays. Keeps every response
+// small so an external pinger never trips a response-size limit. The full
+// summary always goes to the logs; `/api/last-run?full=1` returns it verbatim.
+function compactRun(r) {
+  if (!r) return null;
+  const s = r.summary;
+  const out = { task: r.task, startedAt: r.startedAt, finishedAt: r.finishedAt, ok: r.ok };
+  if (r.error) out.error = String(r.error).slice(0, 300);
+  if (s) {
+    out.counts = {
+      considered: s.considered,
+      sent: s.sent,
+      failed: s.failed,
+      skippedDuplicate: s.skippedDuplicate,
+      skippedInvalidEmail: s.skippedInvalidEmail,
+    };
+    if (s.results && s.results[0]) out.firstSrNo = s.results[0].srNo;
+    if (s.bounces) {
+      out.bounces = {
+        transport: s.bounces.transport,
+        scanned: s.bounces.scanned,
+        newlyBounced: (s.bounces.bounced || []).length,
+        alreadyBounced: s.bounces.alreadyBounced,
+        error: s.bounces.error ? String(s.bounces.error).slice(0, 200) : undefined,
+      };
+    }
+  }
+  return out;
+}
+
 // Kick work off in the background and let the caller return immediately.
 // cron-job.org drops a request after ~30s, so the HTTP response can't wait for a
 // multi-minute batch. Overlap is prevented by `running` (callers get 409).
@@ -58,17 +88,23 @@ function startBackground(task, fn) {
 }
 
 app.get('/health', (req, res) => {
-  const runningForMs = running ? Date.now() - runStartedAt : 0;
-  res.json({ ok: true, running, runningForMs, lastRun, time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    running,
+    runningForMs: running ? Date.now() - runStartedAt : 0,
+    lastRun: compactRun(lastRun),
+    time: new Date().toISOString(),
+  });
 });
 
 app.get('/api/last-run', (req, res) => {
-  res.json({ ok: true, running, lastRun });
+  const full = req.query.full === '1' || req.query.full === 'true';
+  res.json({ ok: true, running, lastRun: full ? lastRun : compactRun(lastRun) });
 });
 
 app.post('/api/send-campaign', (req, res) => {
   if (!authorized(req)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  if (locked()) return res.status(409).json({ ok: false, error: 'A run is already in progress', lastRun });
+  if (locked()) return res.status(409).json({ ok: false, error: 'A run is already in progress' });
 
   const dryRun = req.query.dryRun === 'true' || req.body?.dryRun === true;
   const limit = Number(req.query.limit || req.body?.limit) || undefined;
@@ -78,13 +114,21 @@ app.post('/api/send-campaign', (req, res) => {
 
 app.post('/api/process-bounces', (req, res) => {
   if (!authorized(req)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  if (locked()) return res.status(409).json({ ok: false, error: 'A run is already in progress', lastRun });
+  if (locked()) return res.status(409).json({ ok: false, error: 'A run is already in progress' });
 
   const dryRun = req.query.dryRun === 'true' || req.body?.dryRun === true;
   startBackground('process-bounces', () => processBounces({ dryRun }));
   res.status(202).json({ ok: true, started: true, task: 'process-bounces' });
 });
 
+// Small JSON errors instead of Express's HTML stack-trace page.
+app.use((req, res) => res.status(404).json({ ok: false, error: 'Not found' }));
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('unhandled error:', err);
+  res.status(500).json({ ok: false, error: (err && err.message ? String(err.message) : String(err)).slice(0, 300) });
+});
+
 app.listen(config.port, () => {
-  console.log(`job-mail-automation listening on :${config.port}`);
+  console.log(`job-mail-automation listening on :${config.port} (transport: ${config.mailTransport})`);
 });
