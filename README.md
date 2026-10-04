@@ -1,32 +1,53 @@
 # job-mail-automation
 
-Reads job-outreach contacts from a Google Sheet (via a Google Apps Script web
-app), sends a templated email to every row whose **Status** is `Pending`, then
-writes the result (`Sent` / `Bounced` / `Failed` / `Skipped`) back to the sheet.
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Node >=18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
-Built for my own job search, open-sourced so anyone can run their own copy.
-Everything identifying is config you supply (`.env`, the Google Sheet, the Apps
-Script deployment) - nothing here is tied to my accounts. **`templates/email.*`
-contain my actual outreach copy (name, resume link, phone) as a working
-example** - replace it with your own before sending anything.
+**Turn a Google Sheet of HR/recruiter contacts into a self-hosted, scheduled
+cold-outreach campaign that sends from your own Gmail, tracks bounces
+automatically, and writes `Sent` / `Bounced` / `Failed` back to the sheet —
+for free, running entirely on your own accounts.**
+
+No SaaS, no third-party mail service holding your contact list, no
+per-recipient pricing. Your Google Sheet is the database, your Gmail is the
+sender, Render's free tier is the host.
+
+> Built for my own job search (and it worked — I'm employed now). Open-sourced
+> so anyone can run their own copy. Nothing here is tied to my accounts:
+> everything identifying is config you supply. **`templates/email.*` is my
+> actual outreach copy (name, resume link, phone) kept as a working example —
+> copy `templates/email.example.*` and write your own before sending anything.**
+
+## Why this exists
+
+Manually tracking "did I email this recruiter yet, and did it bounce" in a
+spreadsheet while copy-pasting the same email 50 times is tedious and error
+prone. This automates the loop:
 
 ```
 Google Sheet ──(Apps Script /exec)──►  Node API (Render web service)  ──►  Gmail
       ▲                                          │         ▲               send + read
       └──────────── POST status ◄────────────────┘         └── bounces     bounces
-cron-job.org  ──hourly POST /api/send-campaign──►  Node API (runs in background)
+Apps Script time trigger ──POST /api/send-campaign──►  Node API (runs in background)
 ```
 
-**Mail transport** (`MAIL_TRANSPORT`):
+## Features
 
-| | `smtp` (default) | `gmail_api` |
-| --- | --- | --- |
-| Sends via | Gmail SMTP :465 + App Password | Gmail API over HTTPS :443 |
-| Reads bounces via | IMAP :993 | Gmail API |
-| Works on Render | **No** (465/993 blocked) | **Yes** |
-| Setup | App Password | Desktop OAuth client + refresh token |
-
-Use `smtp` locally, `gmail_api` on Render.
+- **Reads straight from a Google Sheet** — no database, no admin UI; the
+  sheet *is* the contact list and the status board.
+- **Two mail transports**: Gmail SMTP for local use, or the **Gmail API over
+  HTTPS** for hosts that block outbound SMTP/IMAP (Render, most free PaaS).
+- **Automatic bounce detection** — scans your inbox for delivery-failure
+  notices before every batch and marks the row `Bounced`, so you're not
+  flying blind on deliverability.
+- **Duplicate-email protection** within a run, idempotent bounce reconciliation,
+  and a `Failed`/`sent-unrecorded` trail so nothing silently re-sends.
+- **Throttled, resumable batches** — a safe `BATCH_SIZE` per run, picks up
+  exactly where the last run left off (by sheet `Status`).
+- **Runs for free**: Render's free web service + a Google Apps Script time
+  trigger as the scheduler (no paid cron service required).
+- **Dry-run everything** — preview a full batch (reads, renders, bounce scan)
+  with zero sends and zero sheet writes before you trust it with real mail.
 
 ## Sheet layout
 
@@ -63,7 +84,7 @@ To (re)deploy: Apps Script editor → **Deploy → New deployment → Web app**,
 `GOOGLE_SHEET_API`. After editing `Code.gs` you must **Deploy → Manage
 deployments → Edit → new version** (or the URL keeps serving the old code).
 
-> The web app is currently unauthenticated — anyone with the URL can read the
+> The web app is unauthenticated by default — anyone with the URL can read the
 > sheet and write Status. To lock it down, add a token check in `doGet`/`doPost`
 > (e.g. `if (e.parameter.token !== 'SECRET') return jsonResponse({success:false,error:'unauthorized'})`)
 > and set the same value in `GOOGLE_SHEET_API_TOKEN`. The Node client already
@@ -103,7 +124,8 @@ cp templates/email.example.txt templates/email.txt
 ```
 
 Keep the two files in sync; see **Email content** below for the placeholder
-variables available.
+variables available. Running without doing this first fails fast with a
+message telling you exactly what to copy.
 
 ### 4. Local run
 
@@ -136,39 +158,43 @@ this repo, then fill the `sync: false` env vars in the dashboard:
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` (from
   `npm run google-token` — see Setup step 2)
 - `GOOGLE_SHEET_API` (and `GOOGLE_SHEET_API_TOKEN` if you added a token check)
-- `CAMPAIGN_SECRET` is auto-generated — **copy its value**, cron-job.org needs it.
+- `CAMPAIGN_SECRET` is auto-generated — **copy its value**, the scheduler needs it.
 
 Manual alternative: **New → Web Service** from the repo, build `npm install`,
 start `node server.js`, health check `/health`, add the vars from `.env.example`
 plus `MAIL_TRANSPORT=gmail_api`.
 
-Note the free web service sleeps after 15 min idle, so the first request each
-hour is a cold start (~30-60s).
+Note the free web service sleeps after 15 min idle, so an unwarmed first
+request can be slow (~30-60s) — the scheduler below handles that.
 
-## Scheduling with cron-job.org
+## Scheduling — Google Apps Script time trigger (recommended)
 
 `POST /api/send-campaign` starts the batch in the **background** and returns
-`202` immediately, so a pinger that times out long requests is fine. The
-`running` flag makes an overlapping call return `409` (harmless).
+`202` immediately — any pinger works, nothing needs to hold a connection open
+for the full run.
 
-**Main job** — at https://console.cron-job.org → *Create cronjob*:
+Rather than a paid/external cron service, run the scheduler as a small Apps
+Script in your own Google account — it's free, needs no third-party signup,
+and a 10-minute ping conveniently keeps the free Render instance warm at the
+same time:
 
-| Field | Value |
-| --- | --- |
-| URL | `https://<your-service>.onrender.com/api/send-campaign` |
-| Schedule | Every 1 hour (`0 * * * *`) |
-| Request method | `POST` |
-| Header | `x-campaign-secret: <CAMPAIGN_SECRET>` |
-| Save responses / notify on failure | on |
+1. script.google.com → **New project** → paste `apps-script/trigger.gs`.
+2. Set `SERVICE_URL` (your Render URL) and `CAMPAIGN_SECRET` at the top.
+3. Run `keepWarm` once → authorize.
+4. **Triggers** (clock icon) → add two:
 
-A `2xx` (the `202`) counts as success. Enable **retry on failure** so a cold
-start that overruns the 30s limit is retried; the next hourly run would catch up
-anyway.
+   | Function | Interval |
+   | --- | --- |
+   | `keepWarm` | Every 10 minutes (`GET /health`, keeps the instance awake) |
+   | `sendCampaign` | Every hour (`POST /api/send-campaign`) |
 
-**Keep-warm job (recommended)** — a second cronjob, `GET` on
-`https://<your-service>.onrender.com/health` every 10 minutes, no header. This
-keeps the Render instance from sleeping so the main job never hits a cold start.
-(An always-on free instance uses ~730 of the 750 free hours/month.)
+5. **Executions** tab: `keepWarm` → `200`, `sendCampaign` → `202` (or `409` if
+   a run is already in progress — both fine).
+
+`checkLastRun()` in the same file logs the latest run summary on demand. Any
+other pinger (cron-job.org, GitHub Actions, a server you already run) works
+too — just `POST` to `/api/send-campaign` with the `x-campaign-secret` header
+on a schedule, and `GET /health` more frequently if the host sleeps.
 
 **Checking results:** `GET /api/last-run` (or `/health`) returns the summary of
 the most recent run — counts, per-row outcomes, and the bounce scan. Render logs
@@ -213,17 +239,19 @@ The subject comes from `EMAIL_SUBJECT` and supports the same placeholders.
 
 ## Sending volume
 
-The sheet has ~1700 rows. A personal Gmail sends **~500 recipients/day** over SMTP
-(Google Workspace: ~2000); exceeding it triggers a 24h send block, and sustained
-cold blasting from a new pattern risks the account being flagged.
+A personal Gmail sends **~500 recipients/day** over SMTP (Google Workspace:
+~2000); exceeding it triggers a 24h send block, and sustained cold blasting
+from a new pattern risks the account being flagged. Size `BATCH_SIZE` and your
+trigger frequency so the daily total stays under that.
 
-- Defaults: `BATCH_SIZE=15` + hourly cron = **~360/day**, ~5 days for the full list.
-- Ramp up rather than starting at the cap: e.g. `BATCH_SIZE=8` for the first 2-3
-  days, then raise it. Watch the sheet for a run of `Failed` rows — that's usually
-  the quota block; pause for 24h.
-- Run duration ≈ `BATCH_SIZE` x (`SEND_DELAY_MS` + sheet-write time). The Apps
-  Script write is currently ~9s, so 15 rows ≈ 3 min. Keep this well under the
-  1-hour gap between triggers.
+- Example: `BATCH_SIZE=15` + hourly runs = **~360/day** — a 1,500-row sheet
+  clears in about 4-5 days.
+- Ramp up rather than starting at the cap: e.g. `BATCH_SIZE=8` for the first
+  2-3 days, then raise it. Watch the sheet for a run of `Failed` rows — that's
+  usually the quota block; pause for 24h.
+- Run duration ≈ `BATCH_SIZE` × (`SEND_DELAY_MS` + sheet-write time). The Apps
+  Script write is typically a few seconds, so keep a batch comfortably under
+  your trigger interval.
 
 ## Safety notes
 
@@ -233,3 +261,32 @@ cold blasting from a new pattern risks the account being flagged.
 - A send that succeeds but whose status write fails is marked `sent-unrecorded`
   in the run summary — check for these so you don't re-send on the next run.
 - `.env` is git-ignored — never commit real credentials.
+
+## Limitations
+
+- This is address-list outreach, not a reply/conversation manager — it sends
+  once per row and tracks delivery status, nothing more.
+- Bounce detection relies on recognizable delivery-failure notices landing in
+  the same inbox; a provider that silently drops mail without an NDR won't be
+  caught.
+- Deliverability is on you: a personal Gmail account has real daily limits and
+  reputation to protect. Keep volume modest and expect some bounces.
+
+## Contributing
+
+Issues and PRs welcome — this started as a one-person job-search tool, so
+there's plenty of room for a real email-finder integration, multi-provider
+transports, a lighter-weight sheet backend, tests, etc. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for dev setup and how changes are verified
+(there's no automated test suite). Everyone participating is expected to
+follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+Found a vulnerability? Please report it privately rather than as a public
+issue — see [SECURITY.md](SECURITY.md), which also summarizes what each
+credential in this project protects.
+
+## License
+
+[MIT](LICENSE)

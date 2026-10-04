@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/harshuCodes-git/job_mail_automation/security/policy
+    about: Please report security issues privately per SECURITY.md, not as a public issue.

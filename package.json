@@ -1,7 +1,15 @@
 {
   "name": "job-mail-automation",
   "version": "1.0.0",
-  "description": "Automated job-outreach emailer: reads contacts from a Google Sheet, sends via Gmail SMTP, writes status back to the sheet.",
+  "description": "Self-hosted cold-outreach mailer for job hunting: reads contacts from a Google Sheet, sends from your own Gmail (SMTP or Gmail API), tracks bounces, writes status back to the sheet.",
+  "keywords": ["job-search", "cold-email", "gmail-api", "google-sheets", "automation", "outreach"],
+  "license": "MIT",
+  "author": "Harsh Dubey",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/harshuCodes-git/job_mail_automation.git"
+  },
+  "bugs": "https://github.com/harshuCodes-git/job_mail_automation/issues",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
