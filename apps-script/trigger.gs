@@ -15,7 +15,7 @@
  *   5. Executions tab: keepWarm should log 200, sendCampaign 202 (or 409 if a
  *      run overlaps - both fine).
  */
-var SERVICE_URL = 'https://job-mail-automation-onw9.onrender.com';
+var SERVICE_URL = 'https://YOUR-SERVICE.onrender.com';
 var CAMPAIGN_SECRET = 'PUT_THE_RENDER_CAMPAIGN_SECRET_HERE';
 
 function keepWarm() {

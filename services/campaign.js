@@ -8,7 +8,22 @@ const sheet = require('./googleSheet');
 const mailer = require('./mailer');
 const { processBounces } = require('./bounces');
 
-const tpl = (name) => fs.readFileSync(path.join(__dirname, '..', 'templates', name), 'utf8');
+// templates/email.html and templates/email.txt are your own content and are
+// git-ignored (like .env). Copy the matching .example file and customize it.
+function tpl(name) {
+  const file = path.join(__dirname, '..', 'templates', name);
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      throw new Error(
+        `templates/${name} not found. Copy templates/${name.replace(/(\.\w+)$/, '.example$1')} ` +
+          `to templates/${name} and write your own email before running a campaign.`
+      );
+    }
+    throw err;
+  }
+}
 const HTML_TEMPLATE = tpl('email.html');
 const TEXT_TEMPLATE = tpl('email.txt');
 

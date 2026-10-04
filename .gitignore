@@ -2,3 +2,7 @@ node_modules/
 .env
 *.log
 .DS_Store
+
+# Your own email copy - customize via templates/email.example.{html,txt}
+templates/email.html
+templates/email.txt

@@ -4,6 +4,12 @@ Reads job-outreach contacts from a Google Sheet (via a Google Apps Script web
 app), sends a templated email to every row whose **Status** is `Pending`, then
 writes the result (`Sent` / `Bounced` / `Failed` / `Skipped`) back to the sheet.
 
+Built for my own job search, open-sourced so anyone can run their own copy.
+Everything identifying is config you supply (`.env`, the Google Sheet, the Apps
+Script deployment) - nothing here is tied to my accounts. **`templates/email.*`
+contain my actual outreach copy (name, resume link, phone) as a working
+example** - replace it with your own before sending anything.
+
 ```
 Google Sheet ──(Apps Script /exec)──►  Node API (Render web service)  ──►  Gmail
       ▲                                          │         ▲               send + read
@@ -85,7 +91,21 @@ Same password is reused for IMAP bounce reading.
 Scopes used: `gmail.send` + `gmail.modify`. Sends as the real account (SPF/DKIM
 aligned, no "via" header).
 
-### 3. Local run
+### 3. Write your email
+
+`templates/email.html` and `templates/email.txt` are your own content and are
+git-ignored (never committed), the same way `.env` is:
+
+```bash
+cp templates/email.example.html templates/email.html
+cp templates/email.example.txt templates/email.txt
+# edit both - replace the bracketed placeholders with your own pitch, links, name
+```
+
+Keep the two files in sync; see **Email content** below for the placeholder
+variables available.
+
+### 4. Local run
 
 ```bash
 npm install
@@ -181,8 +201,9 @@ Set `PROCESS_BOUNCES=false` to disable, or run it on its own with
 
 ## Email content
 
-Edit `templates/email.html` (HTML) and `templates/email.txt` (plain-text
-fallback) — keep them in sync. Placeholders, filled per row:
+`templates/email.html` (HTML) and `templates/email.txt` (plain-text fallback)
+are your own copy — git-ignored, start from `templates/email.example.{html,txt}`
+(see Setup step 3). Keep the two in sync. Placeholders, filled per row:
 
 - `{{name}}` — recipient first name (`"Anurag Sharma"` → `Anurag`)
 - `{{fullname}}` — the Name cell as-is
@@ -212,5 +233,3 @@ cold blasting from a new pattern risks the account being flagged.
 - A send that succeeds but whose status write fails is marked `sent-unrecorded`
   in the run summary — check for these so you don't re-send on the next run.
 - `.env` is git-ignored — never commit real credentials.
-#   j o b _ m a i l _ a u t o m a t i o n  
- 
