@@ -5,7 +5,9 @@
 //   POST { sr_no, email, status } -> matches a row by Sr no + Email, sets Status
 const config = require('../config');
 
-const TIMEOUT_MS = 20000;
+// Apps Script sometimes takes 15-20 seconds to build and return a large sheet.
+// Leave headroom for network/redirect latency so valid responses aren't aborted.
+const TIMEOUT_MS = 60000;
 
 // header lookup that ignores case and spaces ("Sr no" === "srno" === "SR NO")
 function pick(row, name) {
