@@ -1,0 +1,19 @@
+Hi {{name}},
+
+I'm reaching out about opportunities at {{company}} and wanted to introduce myself directly given your role there.
+
+[Replace this paragraph with 2-3 lines about who you are and what you do - your current role, your main skills, and the kind of role you're looking for.]
+
+- [A concrete achievement or project, with a number if you have one]
+- [Another relevant skill or project]
+- [A third, if useful - keep this list short]
+
+Resume: https://example.com/resume
+Portfolio: https://example.com
+LinkedIn: https://linkedin.com/in/you
+
+Would love to be considered for a role at {{company}}, or to connect if there's a fit. Happy to share more or jump on a quick call.
+
+Best,
+Your Name
+Your phone (optional)
